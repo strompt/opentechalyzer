@@ -40,6 +40,14 @@ export interface ReverseOptions {
   category?: string;
   /** Only sites ranked within this CrUX popularity bucket (1000, 10000, 100000, 1000000...). */
   rank?: number;
+  /** Minimum CrUX rank bucket. Rank is a popularity tier, NOT exact rank or revenue. */
+  minRank?: number;
+  /** ISO alpha-2 country codes identified ONLY from the ccTLD (e.g. PT -> .pt). */
+  countries?: string[];
+  /** 'diverse' uses a reproducible hash-based order rather than the most popular first. */
+  selection?: 'popular' | 'diverse';
+  /** Reproducible sample seed when selection='diverse'. */
+  seed?: number;
   client?: 'desktop' | 'mobile';
   /** Crawl month, first of the month, e.g. '2025-06-01'. */
   date?: string;
@@ -63,6 +71,10 @@ export interface ReverseResult {
   rows?: Array<{ page: string; rank?: number; technologies?: string[] }>;
   totalRows?: number;
   date: string;
+  /** Countries filtered by domain suffix. Not confirmed business locations. */
+  countries?: string[];
+  countryMatch?: 'ccTLD';
+  selection: 'popular' | 'diverse';
   /** Present when the query was not executed, explaining why. */
   notRun?: string;
 }
@@ -142,10 +154,40 @@ function sqlString(value: string): string {
  * `page`, `rank` and the technology array are selected: pulling `custom_metrics` or
  * `lighthouse` would multiply the bytes scanned by orders of magnitude.
  */
+/** Filter by ccTLD only; never imply the company is registered in the country. */
+export function normalizeCountryCodes(countries?: string[]): string[] {
+  if (!countries?.length) return [];
+  if (countries.length > 20) throw new Error('At most 20 country filters are supported.');
+  const result = [...new Set(countries.map((c) => c.trim().toUpperCase()))];
+  if (result.some((c) => !/^[A-Z]{2}$/.test(c) || c === 'EU')) {
+    throw new Error('Use country codes such as PT, ES, FR, DE or GB (not EU).');
+  }
+  return result;
+}
+
 export function buildReverseQuery(options: ReverseOptions): { sql: string; date: string } {
   const date = options.date ?? defaultCrawlDate();
   const client = options.client ?? 'mobile';
   const limit = Math.min(Math.max(options.limit ?? 100, 1), 10_000);
+  const countries = normalizeCountryCodes(options.countries);
+  const selection = options.selection ?? 'popular';
+  if (selection !== 'popular' && selection !== 'diverse') {
+    throw new Error('Invalid selection mode.');
+  }
+  if (options.minRank !== undefined &&
+      (!Number.isSafeInteger(options.minRank) || options.minRank < 1)) {
+    throw new Error('minRank must be a positive integer.');
+  }
+  if (options.rank !== undefined &&
+      (!Number.isSafeInteger(options.rank) || options.rank < 1)) {
+    throw new Error('rank must be a positive integer.');
+  }
+  if (options.minRank !== undefined && options.rank !== undefined && options.minRank > options.rank) {
+    throw new Error('minRank must not exceed rank.');
+  }
+  if (options.seed !== undefined && (!Number.isSafeInteger(options.seed) || options.seed < 0)) {
+    throw new Error('seed must be a nonnegative integer.');
+  }
 
   const where: string[] = [
     `date = ${sqlString(date)}`,
@@ -153,7 +195,14 @@ export function buildReverseQuery(options: ReverseOptions): { sql: string; date:
     // Root pages only: without this the same site appears once per crawled inner page.
     `is_root_page = TRUE`,
   ];
-  if (options.rank) where.push(`\`rank\` <= ${Math.floor(options.rank)}`);
+  if (options.rank !== undefined) where.push(`\`rank\` <= ${options.rank}`);
+  if (options.minRank !== undefined) where.push(`\`rank\` >= ${options.minRank}`);
+  if (countries.length) {
+    // BigQuery NET.HOST parses the URL host; a ccTLD is evidence about domain only.
+    const domains = countries.map((c) => '.' + (c === 'GB' || c === 'UK' ? 'uk' : c.toLowerCase()));
+    const predicates = domains.map((suffix) => `ENDS_WITH(LOWER(NET.HOST(page)), ${sqlString(suffix)})`);
+    where.push('(' + predicates.join(' OR ') + ')');
+  }
 
   const having: string[] = [];
   for (const tech of options.tech ?? []) {
@@ -173,6 +222,9 @@ export function buildReverseQuery(options: ReverseOptions): { sql: string; date:
   // work: a single WHERE over the unnested array can only ever test one element at a time.
   // `rank` is backticked throughout: BigQuery also has a RANK() window function, and leaving
   // the column bare invites an ambiguity error that only shows up at query time.
+  const orderBy = selection === 'diverse'
+    ? `FARM_FINGERPRINT(CONCAT(page, ':', CAST(${options.seed ?? 0} AS STRING)))`
+    : '\`rank\` NULLS LAST, page';
   const sql = `SELECT
   page,
   ANY_VALUE(\`rank\`) AS \`rank\`,
@@ -181,7 +233,7 @@ FROM \`httparchive.crawl.pages\`, UNNEST(technologies) AS t
 WHERE ${where.join('\n  AND ')}
 GROUP BY page
 HAVING ${having.join('\n  AND ')}
-ORDER BY \`rank\` NULLS LAST
+ORDER BY ${orderBy}
 LIMIT ${limit}`;
 
   return { sql, date };
@@ -238,6 +290,8 @@ async function bqQuery(
 export async function reverseLookup(options: ReverseOptions = {}): Promise<ReverseResult> {
   const progress = options.onProgress ?? (() => undefined);
   const { sql, date } = buildReverseQuery(options);
+  const countries = normalizeCountryCodes(options.countries);
+  const selection = options.selection ?? 'popular';
 
   const projectId = await resolveProjectId(options.projectId);
   if (!projectId) {
@@ -259,7 +313,10 @@ export async function reverseLookup(options: ReverseOptions = {}): Promise<Rever
   const estimatedBytes = Number(dry.totalBytesProcessed ?? 0);
   const estimatedCostUsd = (estimatedBytes / 1024 ** 4) * USD_PER_TIB;
 
-  const result: ReverseResult = { query: sql, estimatedBytes, estimatedCostUsd, date };
+  const result: ReverseResult = {
+    query, estimatedBytes, estimatedCostUsd, date, selection,
+    ...(countries.length ? { countries, countryMatch: 'ccTLD' as const } : {}),
+  };
 
   if (options.dryRun) {
     result.notRun = 'Dry run only, nothing was billed.';
