@@ -1,0 +1,19 @@
+name: Validate browser image
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - package.json
+      - package-lock.json
+      - src/**
+      - .github/workflows/validate-browser-image.yml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build browser-enabled container
+        run: docker build -t opentechalyzer-browser:test .
+      - name: Verify Chromium and Node dependencies
+        run: |
+          docker run --rm --entrypoint node opentechalyzer-browser:test -e "import('playwright').then(async ({chromium})=>{const b=await chromium.launch({headless:true}); console.log(await b.version()); await b.close()}).catch(e=>{console.error(e);process.exit(1)})"
