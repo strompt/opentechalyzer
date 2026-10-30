@@ -10,7 +10,12 @@ export interface LocalLead {
   address?: string;
   osmUrl: string;
 }
-const ENDPOINT = 'https://overpass.kumi.systems/api/interpreter';
+// The legacy kumi.systems endpoint may be slow; use the maintained endpoint first.
+// Public Overpass services are best-effort and can time out under load.
+const ENDPOINTS = [
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass-api.de/api/interpreter',
+] as const;
 const MAX_RESPONSE_BYTES = 5_000_000;
 const CITY_RE = /^[\p{L}\p{M}\d .,'’()/-]{2,80}$/u;
 
@@ -44,19 +49,32 @@ export async function discoverLocalBusinesses(city: string, opts: {
   const escapedCity = city.replace(/[\\"]/g, '\\$&');
   const shopFilter = shopType ? `["shop"="${shopType}"]` : '["shop"]';
   const query = `[out:json][timeout:25];area["name"="${escapedCity}"]["boundary"="administrative"]->.a;(nwr${shopFilter}["website"](area.a);nwr${shopFilter}["contact:website"](area.a););out tags center ${Math.min(limit * 5, 500)};`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
-  try {
-    const response = await fetch(ENDPOINT, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': 'Opentechalyzer-STR0M/0.1 local-lead-research' },
-      body: new URLSearchParams({ data: query }),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`Overpass unavailable: HTTP ${response.status}`);
-    const payload = await response.text();
-    if (payload.length > MAX_RESPONSE_BYTES) throw new Error('Overpass response too large');
-    const data = JSON.parse(payload) as { elements?: Array<{ id: number; type: string; tags?: Record<string,string> }> };
+  let data: { elements?: Array<{ id: number; type: string; tags?: Record<string,string> }> } | undefined;
+  const failures: string[] = [];
+  for (const endpoint of ENDPOINTS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 28_000);
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': 'Opentechalyzer-STR0M/0.1 local-lead-research' },
+        body: new URLSearchParams({ data: query }),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.text();
+      if (payload.length > MAX_RESPONSE_BYTES) throw new Error('Response too large');
+      const parsed = JSON.parse(payload) as { elements?: Array<{ id: number; type: string; tags?: Record<string,string> }> };
+      if (!Array.isArray(parsed.elements)) throw new Error('Invalid Overpass response');
+      data = parsed;
+      break;
+    } catch (error) {
+      failures.push(`${new URL(endpoint).hostname}: ${controller.signal.aborted ? 'timeout (28s)' : (error as Error).message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (!data) throw new Error(`Overpass request failed on all providers: ${failures.join('; ')}`);
     const seen = new Set<string>();
     const leads: LocalLead[] = [];
     for (const obj of data.elements ?? []) {
@@ -73,5 +91,4 @@ export async function discoverLocalBusinesses(city: string, opts: {
     }
     return { leads, source: 'OpenStreetMap / Overpass API',
       warning: 'Only shops mapped in OSM with public website tags; not necessarily ecommerce. Municipality boundaries may include surrounding areas. Absence does not mean no business exists. Verify webshop functionality and contact details before outreach.' };
-  } finally { clearTimeout(timer); }
 }
