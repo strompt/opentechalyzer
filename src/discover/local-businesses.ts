@@ -12,7 +12,7 @@ export interface LocalLead {
 }
 const ENDPOINT = 'https://overpass.kumi.systems/api/interpreter';
 const MAX_RESPONSE_BYTES = 5_000_000;
-const CITY_RE = /^[\\p{L}\\p{M}\\d .,'’()\/-]{2,80}$/u;
+const CITY_RE = /^[\p{L}\p{M}\d .,'’()/-]{2,80}$/u;
 
 function publicWebsite(value: string): string | null {
   try {
