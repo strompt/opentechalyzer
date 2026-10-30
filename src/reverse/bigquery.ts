@@ -314,7 +314,7 @@ export async function reverseLookup(options: ReverseOptions = {}): Promise<Rever
   const estimatedCostUsd = (estimatedBytes / 1024 ** 4) * USD_PER_TIB;
 
   const result: ReverseResult = {
-    query, estimatedBytes, estimatedCostUsd, date, selection,
+    query: sql, estimatedBytes, estimatedCostUsd, date, selection,
     ...(countries.length ? { countries, countryMatch: 'ccTLD' as const } : {}),
   };
 
