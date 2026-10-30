@@ -17,6 +17,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { analyze, analyzeMany } from './analyze.js';
+import { discoverLocalBusinesses } from './discover/local-businesses.js';
 import { isRenderAvailable } from './collect/render.js';
 import {
   EXTERNAL_DB_LICENSE_NOTICE,
@@ -180,6 +181,33 @@ const commonInput = {
     ),
   timeout: z.number().optional().describe('Per-request timeout in milliseconds. Default 15000.'),
 };
+
+server.registerTool(
+  'discover_local_businesses',
+  {
+    title: 'Discover local shops and websites',
+    description:
+      'Find publicly listed physical shops with websites in a municipality using OpenStreetMap. ' +
+      'Supports an optional OpenStreetMap shop type. Results are candidate leads, NOT verified online shops. ' +
+      'Use detect_tech_stack_batch afterward for technology screening; do not claim exhaustive coverage.',
+    inputSchema: {
+      city: z.string().min(2).max(80).describe('Municipality, for example Viana do Castelo.'),
+      shopType: z.string().optional().describe('Optional OSM shop tag, e.g. clothes, shoes, jewelry. Omit for all types.'),
+      limit: z.number().int().min(1).max(100).optional().describe('Maximum candidate websites, default 25.'),
+    },
+  },
+  async ({ city, shopType, limit }) => {
+    try {
+      const result = await discoverLocalBusinesses(city, { ...(shopType ? { shopType } : {}), ...(limit ? { limit } : {}) });
+      const lines = [`Found ${result.leads.length} candidate shops with websites in ${city}.`,
+        `Source: ${result.source}`, `Caution: ${result.warning}`, '',
+        ...result.leads.map((lead, index) => `${index + 1}. ${lead.name} [${lead.shop}] — ${lead.website} (${lead.osmUrl})`)];
+      return { content: [{ type: 'text' as const, text: lines.join('\\n') }], structuredContent: result };
+    } catch (error) {
+      return { content: [{ type: 'text' as const, text: `Local discovery failed: ${(error as Error).message}` }], isError: true };
+    }
+  },
+);
 
 server.registerTool(
   'detect_tech_stack',
