@@ -55,6 +55,7 @@ const VERSION: string = await (async () => {
 })();
 
 /** Build a fully configured server instance. Called per session in HTTP mode. */
+function createConfiguredServer(): McpServer {
 const server = new McpServer({ name: 'opentechalyzer', version: VERSION });
 
 /** Compact JSON shape for structured output: everything a model needs, nothing it does not. */
@@ -722,6 +723,9 @@ server.registerTool(
   },
 );
 
+  return server;
+}
+
 function filterByCategories(result: AnalyzeResult, categories: Category[]): AnalyzeResult {
   const wanted = new Set(categories);
   const detections = result.detections.filter((d) => d.categories.some((c) => wanted.has(c)));
@@ -826,7 +830,8 @@ if (argv.includes('--http')) {
           transport.onclose = (): void => {
             if (transport?.sessionId) sessions.delete(transport.sessionId);
           };
-          await server.connect(transport);
+          const sessionServer = createConfiguredServer();
+          await sessionServer.connect(transport);
         }
 
         await transport.handleRequest(req, res, body);
@@ -847,5 +852,6 @@ if (argv.includes('--http')) {
   });
 } else {
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const stdioServer = createConfiguredServer();
+  await stdioServer.connect(transport);
 }
