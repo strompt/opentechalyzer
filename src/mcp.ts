@@ -586,7 +586,7 @@ server.registerTool(
       client: z.enum(['desktop', 'mobile']).optional().describe('Crawl profile. Default mobile.'),
       date: z.string().optional().describe('Crawl month as YYYY-MM-01. Defaults to two months back, since the crawl lags.'),
       limit: z.number().min(1).max(10000).optional().describe('Max sites to return. Default 100.'),
-      dryRun: z.boolean().optional().describe('Estimate the cost and return the SQL without running or billing anything. Do this first.'),
+      dryRun: z.boolean().optional().describe('Estimate the cost and return the SQL without running or billing anything. Default true; pass false explicitly after reviewing the estimate.'),
       maxBytes: z.number().optional().describe('Byte ceiling; the query is refused above it. Default 200GB.'),
       projectId: z.string().optional().describe('Google Cloud project to bill. Falls back to GOOGLE_CLOUD_PROJECT or gcloud config.'),
     },
@@ -603,7 +603,7 @@ server.registerTool(
         ...(limit !== undefined ? { limit } : {}),
         ...(maxBytes !== undefined ? { maxBytes } : {}),
         ...(projectId ? { projectId } : {}),
-        dryRun: dryRun ?? false,
+        dryRun: dryRun ?? true,
       });
 
       const lines: string[] = [

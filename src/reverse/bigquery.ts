@@ -24,6 +24,8 @@
  *  - **Monthly snapshots**, so the data lags by weeks, not minutes.
  */
 
+import { accessTokenFromServiceAccountJson } from './service-account.js';
+
 const BQ_API = 'https://bigquery.googleapis.com/bigquery/v2';
 
 /** Default ceiling on bytes billed. 200 GB is a fifth of the monthly free tier. */
@@ -93,6 +95,8 @@ export async function resolveAccessToken(explicit?: string): Promise<string | nu
   if (explicit) return explicit;
   const fromEnv = process.env['GOOGLE_ACCESS_TOKEN'] ?? process.env['GCP_ACCESS_TOKEN'];
   if (fromEnv) return fromEnv;
+  const configuredAccount = process.env['GCP_SERVICE_ACCOUNT_JSON'];
+  if (configuredAccount) return accessTokenFromServiceAccountJson(configuredAccount);
   try {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
