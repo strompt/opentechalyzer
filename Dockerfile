@@ -4,7 +4,7 @@ WORKDIR /app
 # Chromium requires glibc and OS browser dependencies (not Alpine).
 COPY package*.json ./
 RUN npm ci --no-audit --no-fund \
-    && npm install --no-save --no-audit --no-fund playwright@1.64.1 \
+    && npm install --no-save --no-audit --no-fund playwright \
     && npx playwright install --with-deps chromium
 
 COPY . .
