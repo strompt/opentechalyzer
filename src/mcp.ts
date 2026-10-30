@@ -583,6 +583,10 @@ server.registerTool(
         .number()
         .optional()
         .describe('Restrict to sites within the top N by CrUX popularity (1000, 10000, 100000, 1000000). Strongly recommended: it is the single biggest lever on query cost.'),
+      countries: z.array(z.string()).max(20).optional().describe('Country ISO codes (PT, ES, FR, DE, GB). Filters ccTLD domains only; does not verify business country.'),
+      minRank: z.number().int().positive().optional().describe('Minimum CrUX popularity tier (higher value = typically less popular; NOT sales revenue).'),
+      selection: z.enum(['popular', 'diverse']).optional().describe('Sort popular first or select reproducibly across matches. Default popular.'),
+      seed: z.number().int().nonnegative().optional().describe('Change the reproducible diverse sample.'),
       client: z.enum(['desktop', 'mobile']).optional().describe('Crawl profile. Default mobile.'),
       date: z.string().optional().describe('Crawl month as YYYY-MM-01. Defaults to two months back, since the crawl lags.'),
       limit: z.number().min(1).max(10000).optional().describe('Max sites to return. Default 100.'),
@@ -591,13 +595,17 @@ server.registerTool(
       projectId: z.string().optional().describe('Google Cloud project to bill. Falls back to GOOGLE_CLOUD_PROJECT or gcloud config.'),
     },
   },
-  async ({ tech, notTech, category, rank, client, date, limit, dryRun, maxBytes, projectId }) => {
+  async ({ tech, notTech, category, rank, minRank, countries, selection, seed, client, date, limit, dryRun, maxBytes, projectId }) => {
     try {
       const result = await reverseLookup({
         ...(tech?.length ? { tech } : {}),
         ...(notTech?.length ? { notTech } : {}),
         ...(category ? { category } : {}),
         ...(rank !== undefined ? { rank } : {}),
+        ...(minRank !== undefined ? { minRank } : {}),
+        ...(countries?.length ? { countries } : {}),
+        ...(selection ? { selection } : {}),
+        ...(seed !== undefined ? { seed } : {}),
         ...(client ? { client } : {}),
         ...(date ? { date } : {}),
         ...(limit !== undefined ? { limit } : {}),
@@ -611,6 +619,7 @@ server.registerTool(
         `Estimated scan: ${humanBytes(result.estimatedBytes)} (~$${result.estimatedCostUsd.toFixed(2)}; first 1 TB/month is free).`,
         '',
       ];
+      if (result.countries?.length) lines.push(`Domain suffix filter: ${result.countries.join(', ')} (ccTLD only; NOT verified company country).`, `Selection: ${result.selection}.`, '');
       if (result.notRun) {
         lines.push(result.notRun, '', 'SQL that would run:', result.query);
       } else {
