@@ -59,8 +59,7 @@ const VERSION: string = await (async () => {
 function createConfiguredServer(): McpServer {
 const server = new McpServer({ name: 'opentechalyzer', version: VERSION });
 // Remote staging defaults to read-only: mutating/paid tools are not registered.
-const sideEffectsEnabled = !process.argv.includes('--http') ||
-  process.env['MCP_HTTP_ENABLE_SIDE_EFFECTS'] === '1';
+const sideEffectsEnabled = !process.argv.includes('--http');
 
 /** Compact JSON shape for structured output: everything a model needs, nothing it does not. */
 function toStructured(result: AnalyzeResult): Record<string, unknown> {
