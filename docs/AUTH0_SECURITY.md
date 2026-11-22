@@ -60,11 +60,22 @@ not executed by this branch):
 
 ```js
 exports.onExecutePostLogin = async (event, api) => {
+  // Configure STRM_MCP_CLIENT_ID as an Auth0 Action secret for staging.
+  const mcpClientId = event.secrets.STRM_MCP_CLIENT_ID;
+  if (!mcpClientId) {
+    api.access.deny('STRØM MCP staging is not configured.');
+    return;
+  }
+
+  // This Action may be attached to a shared Auth0 tenant; leave unrelated
+  // applications unaffected.
+  if (event.client.client_id !== mcpClientId) return;
+
   const allowed = 'strom.studio.pt@gmail.com';
   const email = typeof event.user.email === 'string'
     ? event.user.email.trim().toLowerCase()
     : '';
-  if (!event.user.email_verified || email !== allowed) {
+  if (event.user.email_verified !== true || email !== allowed) {
     api.access.deny('This account is not enabled for STRØM MCP staging.');
     return;
   }
@@ -73,9 +84,11 @@ exports.onExecutePostLogin = async (event, api) => {
 ```
 
 **Important:** This example denies users at the Auth0 Action layer.
-For a tenant that hosts other applications, restrict this Action to the
-specific MCP Auth0 application/API before deploying; otherwise it could block
-unrelated logins. The MCP's own verified-email check is a second mandatory
+For a tenant that hosts other applications, set `STRM_MCP_CLIENT_ID` in
+the Action's secrets to the **exact Auth0 client ID** of the staging MCP.
+The Action's client-ID guard leaves unrelated applications unaffected; if
+that secret is absent, the Action denies login rather than silently
+bypassing access control. The MCP's own verified-email check is a second mandatory
 line of defence.
 
 The email allowlist is a **test-access policy**, not a commercial multi-tenant
