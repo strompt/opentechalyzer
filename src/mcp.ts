@@ -14,6 +14,7 @@
  * is written to be read by a model: grouped by category, confidence first, no ANSI codes.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Auth0TokenVerifier, AuthFailure, bearerChallenge, loadAuthConfig, protectedResourceMetadata } from './auth.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { analyze, analyzeMany } from './analyze.js';
@@ -57,6 +58,8 @@ const VERSION: string = await (async () => {
 /** Build a fully configured server instance. Called per session in HTTP mode. */
 function createConfiguredServer(): McpServer {
 const server = new McpServer({ name: 'opentechalyzer', version: VERSION });
+// Remote staging defaults to read-only: mutating/paid tools are not registered.
+const sideEffectsEnabled = !process.argv.includes('--http');
 
 /** Compact JSON shape for structured output: everything a model needs, nothing it does not. */
 function toStructured(result: AnalyzeResult): Record<string, unknown> {
@@ -509,6 +512,7 @@ server.registerTool(
   },
 );
 
+if (sideEffectsEnabled) {
 server.registerTool(
   'track_tech_changes',
   {
@@ -554,6 +558,9 @@ server.registerTool(
 );
 
 
+}
+
+if (sideEffectsEnabled) {
 server.registerTool(
   'reverse_lookup',
   {
@@ -646,6 +653,8 @@ server.registerTool(
   },
 );
 
+}
+
 server.registerTool(
   'opentechalyzer_status',
   {
@@ -668,13 +677,17 @@ server.registerTool(
       `Headless rendering: ${renderAvailable ? 'available' : 'NOT available (install playwright to enable render:true)'}`,
       external.installed
         ? `External database: installed, ${external.count ?? '?'} extra fingerprints (imported ${external.importedAt ?? '?'})`
-        : `External database: not installed. Call import_external_database to widen long-tail coverage.`,
+        : sideEffectsEnabled
+          ? 'External database: not installed. Call import_external_database to widen long-tail coverage.'
+          : 'External database: not installed. External database import is disabled in HTTP safe mode.',
       tranco.installed
         ? `Traffic ranking: installed, ${tranco.count ?? '?'} ranked domains`
         : `Traffic ranking: not installed, so trafficRank and trafficLevel are unavailable. The user can run \`opentechalyzer db import-tranco\`.`,
       '',
       'Available tools: detect_tech_stack, detect_tech_stack_batch, compare_tech_stacks, tech_stack_report,',
-      'find_subdomains, verify_email, find_vulnerabilities, track_tech_changes, reverse_lookup.',
+      sideEffectsEnabled
+        ? 'find_subdomains, verify_email, find_vulnerabilities, track_tech_changes, reverse_lookup, import_external_database.'
+        : 'find_subdomains, verify_email, find_vulnerabilities. HTTP safe mode: side-effect tools disabled.',
     ].join('\n');
     return {
       content: [{ type: 'text' as const, text }],
@@ -690,6 +703,7 @@ server.registerTool(
   },
 );
 
+if (sideEffectsEnabled) {
 server.registerTool(
   'import_external_database',
   {
@@ -732,6 +746,8 @@ server.registerTool(
   },
 );
 
+}
+
   return server;
 }
 
@@ -748,19 +764,16 @@ function filterByCategories(result: AnalyzeResult, categories: Category[]): Anal
 }
 
 /**
- * Transport selection.
- *
- * stdio is the default and is what local clients use: Claude Code, Claude Desktop, Codex,
- * Cursor, Windsurf, Zed. They spawn this process and talk over its pipes.
- *
- * Browser-hosted clients cannot spawn a local process, so ChatGPT and claude.ai require a
- * reachable HTTPS endpoint speaking Streamable HTTP instead. `--http` serves exactly that.
- * Run it behind a tunnel (`cloudflared tunnel --url http://localhost:3000`) or deploy it,
- * then give the client the resulting `https://.../mcp` URL.
+ * HTTP mode is protected by Auth0 bearer token verification. Unlike stdio
+ * (which is a local process transport), remote access must never be anonymous.
+ * OAuth metadata is public, but every MCP request requires a valid access token.
  */
 const argv = process.argv.slice(2);
 
 if (argv.includes('--http')) {
+  // Fail fast on missing or malformed configuration, before opening a socket.
+  const authConfig = loadAuthConfig();
+  const tokenVerifier = new Auth0TokenVerifier(authConfig);
   const portFlag = argv.indexOf('--port');
   const port = portFlag >= 0 ? Number(argv[portFlag + 1] ?? 3000) : Number(process.env['PORT'] ?? 3000);
   const host = argv.includes('--host') ? (argv[argv.indexOf('--host') + 1] ?? '127.0.0.1') : '127.0.0.1';
@@ -772,91 +785,160 @@ if (argv.includes('--http')) {
   const { createServer } = await import('node:http');
   const { randomUUID } = await import('node:crypto');
 
-  /**
-   * Session-managed transports, keyed by the session id the SDK issues on initialize.
-   *
-   * A stateless transport was tried first and rejected everything after `initialize`, because
-   * the protocol requires a handshake before any other method and there was nowhere to record
-   * that it had happened. Real clients open a session and reuse it, so sessions are tracked.
-   */
-  const sessions = new Map<string, InstanceType<typeof StreamableHTTPServerTransport>>();
+  type Transport = InstanceType<typeof StreamableHTTPServerTransport>;
+  const sessions = new Map<string, { transport: Transport; principal: string }>();
+  const maximumBodyBytes = 1024 * 1024;
+  const metadata = protectedResourceMetadata(authConfig);
 
   const http = createServer((req, res) => {
-    const url = req.url ?? '/';
+    void (async () => {
+      try {
+        const path = new URL(req.url ?? '/', 'http://localhost').pathname;
 
-    if (!url.startsWith('/mcp')) {
-      const healthy = url === '/health' || url === '/';
-      res.writeHead(healthy ? 200 : 404, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify(
-          healthy
-            ? { ok: true, server: 'opentechalyzer', version: VERSION, endpoint: '/mcp', sessions: sessions.size }
-            : { error: 'Not found. The MCP endpoint is /mcp' },
-        ),
-      );
-      return;
-    }
+        if (path === '/health') {
+          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+          res.end(JSON.stringify({ ok: true, server: 'opentechalyzer', version: VERSION }));
+          return;
+        }
 
-    const chunks: Buffer[] = [];
-    req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => {
-      void (async () => {
+        if (
+          path === '/.well-known/oauth-protected-resource' ||
+          path === '/.well-known/oauth-protected-resource/mcp'
+        ) {
+          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+          res.end(JSON.stringify(metadata));
+          return;
+        }
+
+        if (path !== '/mcp') {
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Not found' }));
+          return;
+        }
+
+        // Avoid browser-originated cross-site requests unless explicitly allowed.
+        const origin = req.headers['origin'];
+        const allowedOrigins = (process.env['MCP_ALLOWED_ORIGINS'] ?? '')
+          .split(',').map((value) => value.trim()).filter(Boolean);
+        if (origin && (typeof origin !== 'string' || !allowedOrigins.includes(origin))) {
+          res.writeHead(403, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Origin not permitted' }));
+          return;
+        }
+
+        let identity;
+        try {
+          identity = await tokenVerifier.verifyRequest(req);
+        } catch (error) {
+          if (error instanceof AuthFailure) {
+            const headers: Record<string, string> = {
+              'content-type': 'application/json',
+              'cache-control': 'no-store',
+              'www-authenticate': bearerChallenge(authConfig, error.code),
+            };
+            res.writeHead(error.status, headers);
+            res.end(JSON.stringify({ error: error.code }));
+            return;
+          }
+          throw error;
+        }
+
+        if (!['GET', 'POST', 'DELETE'].includes(req.method ?? '')) {
+          res.writeHead(405, { allow: 'GET, POST, DELETE' });
+          res.end();
+          return;
+        }
+
+        const sessionId = req.headers['mcp-session-id'];
+        if (sessionId && typeof sessionId !== 'string') {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid session header' }));
+          return;
+        }
+        const existingSession = sessionId ? sessions.get(sessionId) : undefined;
+        if (sessionId && !existingSession) {
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Unknown session' }));
+          return;
+        }
+        if (existingSession && existingSession.principal !== identity.principal) {
+          res.writeHead(403, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Session not owned by authenticated principal' }));
+          return;
+        }
+
         let body: unknown;
-        if (chunks.length > 0) {
+        if (req.method === 'POST') {
+          const chunks: Buffer[] = [];
+          let size = 0;
+          for await (const chunk of req) {
+            const part: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            size += part.length;
+            if (size > maximumBodyBytes) {
+              res.writeHead(413, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Request body too large' }));
+              return;
+            }
+            chunks.push(part);
+          }
           try {
             body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           } catch {
             res.writeHead(400, { 'content-type': 'application/json' });
-            res.end(
-              JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' }, id: null }),
-            );
+            res.end(JSON.stringify({
+              jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' }, id: null,
+            }));
             return;
           }
         }
 
-        const sessionId = req.headers['mcp-session-id'] as string | undefined;
-        let transport = sessionId ? sessions.get(sessionId) : undefined;
-
-        if (!transport) {
-          if (!isInitializeRequest(body)) {
+        let transport: Transport;
+        if (existingSession) {
+          transport = existingSession.transport;
+        } else {
+          if (req.method !== 'POST' || !isInitializeRequest(body)) {
             res.writeHead(400, { 'content-type': 'application/json' });
-            res.end(
-              JSON.stringify({
-                jsonrpc: '2.0',
-                error: { code: -32000, message: 'No valid session. Send an initialize request first.' },
-                id: null,
-              }),
-            );
+            res.end(JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32000, message: 'Send an initialize request first' },
+              id: null,
+            }));
             return;
           }
-          // A fresh transport and server per session, so concurrent clients stay isolated.
-          transport = new StreamableHTTPServerTransport({
+          const principal = identity.principal;
+          const freshTransport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (id: string): void => {
-              sessions.set(id, transport as never);
+              sessions.set(id, { transport: freshTransport, principal });
             },
           });
-          transport.onclose = (): void => {
-            if (transport?.sessionId) sessions.delete(transport.sessionId);
+          freshTransport.onclose = (): void => {
+            const id = freshTransport.sessionId;
+            if (id && sessions.get(id)?.transport === freshTransport) sessions.delete(id);
           };
           const sessionServer = createConfiguredServer();
-          await sessionServer.connect(transport);
+          await sessionServer.connect(freshTransport);
+          transport = freshTransport;
         }
 
         await transport.handleRequest(req, res, body);
-      })();
-    });
+      } catch (error) {
+        // Never return tokens or stack traces in HTTP responses.
+        process.stderr.write(`MCP HTTP request failed: ${error instanceof Error ? error.name : 'unknown'}\n`);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Internal server error' }));
+        } else if (!res.writableEnded) {
+          res.end();
+        }
+      }
+    })();
   });
 
   http.listen(port, host, () => {
     process.stderr.write(
-      `Opentechalyzer MCP listening on http://${host}:${port}/mcp\n` +
-        `Health check: http://${host}:${port}/health\n\n` +
-        `Browser-based clients (ChatGPT, claude.ai) need a public HTTPS URL. Expose this with:\n` +
-        `  cloudflared tunnel --url http://${host}:${port}\n` +
-        `then add the resulting https URL + /mcp as a connector.\n\n` +
-        `This endpoint is UNAUTHENTICATED. Do not expose it to the open internet without\n` +
-        `putting auth in front of it, or anyone who finds the URL can run scans through you.\n`,
+      `Opentechalyzer authenticated MCP listening on http://${host}:${port}/mcp\n` +
+      'Auth0 JWT validation enabled; anonymous MCP requests are rejected.\n',
     );
   });
 } else {
