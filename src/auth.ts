@@ -13,6 +13,7 @@ export interface AuthConfig {
   audience: string;
   resource: string;
   requiredScope: string;
+  allowedEmail: string;
 }
 
 export interface AuthIdentity {
@@ -26,6 +27,7 @@ type PublicJwk = JsonObject & { kty: string; kid: string };
 const CLOCK_SKEW_SECONDS = 30;
 const CACHE_MS = 5 * 60 * 1000;
 const MAX_TOKEN_LENGTH = 16_384;
+export const VERIFIED_EMAIL_CLAIM = 'https://stromstudio.pt/verified_email';
 
 export class AuthFailure extends Error {
   constructor(
@@ -66,7 +68,11 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
 
   const requiredScope = required(env['MCP_REQUIRED_SCOPE'] ?? 'scan:website', 'MCP_REQUIRED_SCOPE');
   if (!/^[A-Za-z0-9:._-]+$/.test(requiredScope)) throw new Error('Invalid MCP_REQUIRED_SCOPE');
-  return { issuer, audience, resource: resourceUrl.toString(), requiredScope };
+  const allowedEmail = required(env['MCP_ALLOWED_EMAIL'], 'MCP_ALLOWED_EMAIL').toLowerCase();
+  if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(allowedEmail)) {
+    throw new Error('MCP_ALLOWED_EMAIL must be an email address');
+  }
+  return { issuer, audience, resource: resourceUrl.toString(), requiredScope, allowedEmail };
 }
 
 function objectFromPart(part: string): JsonObject {
@@ -201,6 +207,14 @@ export class Auth0TokenVerifier {
       signatureValid = false;
     }
     if (!signatureValid) throw new AuthFailure(401, 'invalid_token', 'Invalid token signature');
+
+    // Staging-only allowlist. This claim is issued exclusively after Auth0
+    // confirms email_verified=true via a Post-Login Action. Never trust a
+    // caller-supplied email header or an unverified token email claim.
+    const verifiedEmail = payload[VERIFIED_EMAIL_CLAIM];
+    if (typeof verifiedEmail !== 'string' || verifiedEmail.toLowerCase() !== this.config.allowedEmail) {
+      throw new AuthFailure(403, 'access_denied', 'Account not permitted for this MCP');
+    }
 
     return { subject: payload['sub'], principal: `${this.config.issuer}:${payload['sub']}` };
   }
