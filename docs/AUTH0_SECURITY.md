@@ -25,6 +25,7 @@ AUTH0_ISSUER=https://YOUR_TENANT.eu.auth0.com/
 AUTH0_AUDIENCE=https://mcp.example.com/mcp
 MCP_PUBLIC_URL=https://mcp.example.com/mcp
 MCP_REQUIRED_SCOPE=scan:website
+MCP_ALLOWED_EMAIL=strom.studio.pt@gmail.com
 # Only if the MCP client uses browser-originated requests:
 # MCP_ALLOWED_ORIGINS=https://chatgpt.com
 ```
@@ -43,6 +44,49 @@ registration (DCR/CIMD) and API audience selection requires a separate **real
 authorization flow test**; serving resource metadata alone does not guarantee
 interactive login will succeed.
 
+## Restricting the test account (email allowlist)
+
+The only permitted email for staging is `strom.studio.pt@gmail.com`.
+The GitHub repository login (`strompt`) is separate from the Auth0 identity.
+Do not infer that the GitHub login's primary email matches an Auth0 user.
+
+The MCP does not trust a raw email header or the usual JWT `email` claim.
+The token MUST contain a cryptographically signed **verified email claim**
+(`https://stromstudio.pt/verified_email`) emitted by Auth0 **only** when
+`event.user.email_verified === true`.
+
+Example Auth0 **Post-Login Action** (configure manually in a staging Auth0 app;
+not executed by this branch):
+
+```js
+exports.onExecutePostLogin = async (event, api) => {
+  const allowed = 'strom.studio.pt@gmail.com';
+  const email = typeof event.user.email === 'string'
+    ? event.user.email.trim().toLowerCase()
+    : '';
+  if (!event.user.email_verified || email !== allowed) {
+    api.access.deny('This account is not enabled for STRØM MCP staging.');
+    return;
+  }
+  api.accessToken.setCustomClaim('https://stromstudio.pt/verified_email', email);
+};
+```
+
+**Important:** This example denies users at the Auth0 Action layer.
+For a tenant that hosts other applications, restrict this Action to the
+specific MCP Auth0 application/API before deploying; otherwise it could block
+unrelated logins. The MCP's own verified-email check is a second mandatory
+line of defence.
+
+The email allowlist is a **test-access policy**, not a commercial multi-tenant
+authorization system. When onboarding paying customers, replace it with
+per-tenant identity, user IDs, roles and permissions, not a single shared
+email or global allowlist. Consider also binding initial staging access to
+the exact immutable Auth0 `sub` once it has been confirmed in the tenant.
+
+The Action and Auth0 client configuration have **not** been installed or
+verified on any real Auth0 tenant. There has been no production deploy.
+
 ## Smoke tests for a future staging environment
 
 1. `GET /health` -> `200`, minimal public health information.
@@ -50,8 +94,8 @@ interactive login will succeed.
 3. `POST /mcp` with no bearer token -> `401` + `WWW-Authenticate`.
 4. Malformed, expired, wrong-issuer or wrong-audience tokens -> `401`.
 5. Valid token without required scope -> `403`.
-6. Valid token with correct scope -> MCP initialize succeeds.
-7. A second subject reusing another subject's session ID -> `403`.
+6. Valid token with correct scope **and signed verified-email claim for the approved account** -> MCP initialize succeeds.
+7. Wrong/missing signed verified-email claim -> `403`; a second subject reusing another subject's session ID -> `403`.
 8. Verify the origin policy matches how the chosen ChatGPT client connects.
 9. Verify no alternate exposed port or domain bypasses auth at the edge.
 10. Verify connection and reconnection using the actual ChatGPT OAuth flow.
