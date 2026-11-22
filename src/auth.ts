@@ -69,7 +69,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
   const requiredScope = required(env['MCP_REQUIRED_SCOPE'] ?? 'scan:website', 'MCP_REQUIRED_SCOPE');
   if (!/^[A-Za-z0-9:._-]+$/.test(requiredScope)) throw new Error('Invalid MCP_REQUIRED_SCOPE');
   const allowedEmail = required(env['MCP_ALLOWED_EMAIL'], 'MCP_ALLOWED_EMAIL').toLowerCase();
-  if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(allowedEmail)) {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(allowedEmail)) {
     throw new Error('MCP_ALLOWED_EMAIL must be an email address');
   }
   return { issuer, audience, resource: resourceUrl.toString(), requiredScope, allowedEmail };
