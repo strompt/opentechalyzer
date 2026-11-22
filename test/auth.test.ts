@@ -140,6 +140,12 @@ describe('Auth0 HTTP MCP security', () => {
       .rejects.toMatchObject({ status: 403, code: 'insufficient_scope' });
   });
 
+  it('rejects an unsigned-forged insufficient-scope token as invalid, not insufficient scope', async () => {
+    await expect(verifier().verifyRequest(request(
+      token({ scope: 'unauthorized:scope' }, otherKeys.privateKey),
+    ))).rejects.toMatchObject({ status: 401, code: 'invalid_token' });
+  });
+
   it('rejects a token with a malformed signature or encoding', async () => {
     await expect(verifier().verifyRequest(request('not-a-jwt')))
       .rejects.toMatchObject({ status: 401, code: 'invalid_token' });
