@@ -55,41 +55,51 @@ The token MUST contain a cryptographically signed **verified email claim**
 (`https://stromstudio.pt/verified_email`) emitted by Auth0 **only** when
 `event.user.email_verified === true`.
 
-Example Auth0 **Post-Login Action** (configure manually in a staging Auth0 app;
-not executed by this branch):
+Example Auth0 **Post-Login Action** (to configure in a **staging** Auth0
+application; not executed by this branch). Use the **API audience**, rather
+than a fixed OAuth `client_id`, because ChatGPT may connect using dynamically
+registered OAuth clients (DCR or CIMD):
 
 ```js
 exports.onExecutePostLogin = async (event, api) => {
-  // Configure STRM_MCP_CLIENT_ID as an Auth0 Action secret for staging.
-  const mcpClientId = event.secrets.STRM_MCP_CLIENT_ID;
-  if (!mcpClientId) {
-    api.access.deny('STRØM MCP staging is not configured.');
-    return;
-  }
+  // Set STRM_MCP_API_AUDIENCE as an Auth0 Action secret. Its value must
+  // equal the Auth0 API Identifier / AUTH0_AUDIENCE configured on the MCP.
+  const audience = event.secrets?.STRM_MCP_API_AUDIENCE;
+  if (!audience) return; // No claim issued; the MCP itself denies access.
 
-  // This Action may be attached to a shared Auth0 tenant; leave unrelated
-  // applications unaffected.
-  if (event.client.client_id !== mcpClientId) return;
+  // The Action can be linked to a tenant with other applications/APIs.
+  // A missing or different resource server is not this MCP.
+  if (event.resource_server?.identifier !== audience) return;
 
-  const allowed = 'strom.studio.pt@gmail.com';
-  const email = typeof event.user.email === 'string'
+  const allowedEmail = 'strom.studio.pt@gmail.com';
+  const verifiedEmail = event.user.email_verified === true
+    && typeof event.user.email === 'string'
     ? event.user.email.trim().toLowerCase()
     : '';
-  if (event.user.email_verified !== true || email !== allowed) {
-    api.access.deny('This account is not enabled for STRØM MCP staging.');
+  if (verifiedEmail !== allowedEmail) {
+    api.access.deny('Account not authorized for STRØM MCP staging.');
     return;
   }
-  api.accessToken.setCustomClaim('https://stromstudio.pt/verified_email', email);
+
+  api.accessToken.setCustomClaim(
+    'https://stromstudio.pt/verified_email',
+    verifiedEmail,
+  );
 };
 ```
 
-**Important:** This example denies users at the Auth0 Action layer.
-For a tenant that hosts other applications, set `STRM_MCP_CLIENT_ID` in
-the Action's secrets to the **exact Auth0 client ID** of the staging MCP.
-The Action's client-ID guard leaves unrelated applications unaffected; if
-that secret is absent, the Action denies login rather than silently
-bypassing access control. The MCP's own verified-email check is a second mandatory
-line of defence.
+**Important:** In Auth0 Actions, `event.resource_server.identifier` identifies
+the target API when that context is available. It may be absent if the OAuth
+request has not been associated with the MCP API audience. The Action must
+then avoid modifying other applications' logins and omit the claim; the MCP
+will deny any token missing the signed verified-email claim.
+
+Set `STRM_MCP_API_AUDIENCE` to the **actual Auth0 API Identifier**, not an
+Auth0 client ID or GitHub login. Ensure the OAuth client can obtain an access
+token for that audience; in particular, enable the relevant Auth0 MCP
+resource-parameter compatibility mode if supported by your tenant, and
+validate the actual ChatGPT login flow. A passing JWT unit test is not
+proof that dynamic client registration or token audience mapping works.
 
 The email allowlist is a **test-access policy**, not a commercial multi-tenant
 authorization system. When onboarding paying customers, replace it with
@@ -99,6 +109,22 @@ the exact immutable Auth0 `sub` once it has been confirmed in the tenant.
 
 The Action and Auth0 client configuration have **not** been installed or
 verified on any real Auth0 tenant. There has been no production deploy.
+
+## Read-only staging preflight (no user tokens needed)
+
+Once a separate staging service is deployed **after explicit approval**, run:
+
+```bash
+node scripts/auth0-mcp-preflight.mjs https://STAGING_HOST/mcp
+```
+
+The preflight checks HTTPS, OAuth protected-resource discovery, Auth0 issuer
+discovery, anonymous MCP 401 and Bearer challenge headers. It intentionally
+does not log in, request tokens, or modify remote services.
+
+Successful preflight **does not prove** that ChatGPT can authenticate, that
+user-identity claims are emitted, or that the real service has no unprotected
+alternate port. These are separate manual checks.
 
 ## Smoke tests for a future staging environment
 
