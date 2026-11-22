@@ -58,6 +58,9 @@ const VERSION: string = await (async () => {
 /** Build a fully configured server instance. Called per session in HTTP mode. */
 function createConfiguredServer(): McpServer {
 const server = new McpServer({ name: 'opentechalyzer', version: VERSION });
+// Remote staging defaults to read-only: mutating/paid tools are not registered.
+const sideEffectsEnabled = !process.argv.includes('--http') ||
+  process.env['MCP_HTTP_ENABLE_SIDE_EFFECTS'] === '1';
 
 /** Compact JSON shape for structured output: everything a model needs, nothing it does not. */
 function toStructured(result: AnalyzeResult): Record<string, unknown> {
@@ -510,6 +513,7 @@ server.registerTool(
   },
 );
 
+if (sideEffectsEnabled) {
 server.registerTool(
   'track_tech_changes',
   {
@@ -555,6 +559,9 @@ server.registerTool(
 );
 
 
+}
+
+if (sideEffectsEnabled) {
 server.registerTool(
   'reverse_lookup',
   {
@@ -647,6 +654,8 @@ server.registerTool(
   },
 );
 
+}
+
 server.registerTool(
   'opentechalyzer_status',
   {
@@ -669,13 +678,17 @@ server.registerTool(
       `Headless rendering: ${renderAvailable ? 'available' : 'NOT available (install playwright to enable render:true)'}`,
       external.installed
         ? `External database: installed, ${external.count ?? '?'} extra fingerprints (imported ${external.importedAt ?? '?'})`
-        : `External database: not installed. Call import_external_database to widen long-tail coverage.`,
+        : sideEffectsEnabled
+          ? 'External database: not installed. Call import_external_database to widen long-tail coverage.'
+          : 'External database: not installed. External database import is disabled in HTTP safe mode.',
       tranco.installed
         ? `Traffic ranking: installed, ${tranco.count ?? '?'} ranked domains`
         : `Traffic ranking: not installed, so trafficRank and trafficLevel are unavailable. The user can run \`opentechalyzer db import-tranco\`.`,
       '',
       'Available tools: detect_tech_stack, detect_tech_stack_batch, compare_tech_stacks, tech_stack_report,',
-      'find_subdomains, verify_email, find_vulnerabilities, track_tech_changes, reverse_lookup.',
+      sideEffectsEnabled
+        ? 'find_subdomains, verify_email, find_vulnerabilities, track_tech_changes, reverse_lookup, import_external_database.'
+        : 'find_subdomains, verify_email, find_vulnerabilities. HTTP safe mode: side-effect tools disabled.',
     ].join('\n');
     return {
       content: [{ type: 'text' as const, text }],
@@ -691,6 +704,7 @@ server.registerTool(
   },
 );
 
+if (sideEffectsEnabled) {
 server.registerTool(
   'import_external_database',
   {
@@ -732,6 +746,8 @@ server.registerTool(
     };
   },
 );
+
+}
 
   return server;
 }
