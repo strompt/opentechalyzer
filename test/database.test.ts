@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { BUILTIN_FINGERPRINTS, listCategories } from '../src/fingerprints/index.js';
-import { convertWappalyzerTech } from '../src/fingerprints/external.js';
+import { convertWappalyzerTech, isInformativeDomSelector, loadExternalDatabase } from '../src/fingerprints/external.js';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildReverseQuery, defaultCrawlDate } from '../src/reverse/bigquery.js';
 import type { Fingerprint, PatternInput } from '../src/types.js';
 
@@ -166,6 +169,47 @@ describe('Wappalyzer format adapter', () => {
     expect(convertWappalyzerTech('A', { dom: '.x' }).dom).toEqual(['.x']);
     expect(convertWappalyzerTech('B', { dom: ['.y'] }).dom).toEqual(['.y']);
     expect(convertWappalyzerTech('C', { dom: { '.z': {} } }).dom).toEqual(['.z']);
+  });
+
+  it('rejects generic DOM selectors that match almost every rendered website', () => {
+    for (const selector of ['script', 'title', 'iframe', 'footer > div', 'html body', 'style, script', '.specific, script']) {
+      expect(isInformativeDomSelector(selector), selector).toBe(false);
+    }
+  });
+
+  it('preserves DOM selectors that refer to identifiable technology markers', () => {
+    for (const selector of ['#app', '.shopify-section', 'script[src*="widget.js"]', '[data-shopify]', 'iframe[src="https://vendor.example"]']) {
+      expect(isInformativeDomSelector(selector), selector).toBe(true);
+    }
+  });
+
+  it('filters generic selectors from converted external fingerprints', () => {
+    const fp = convertWappalyzerTech('Example Widget', {
+      dom: { 'script': {}, '#vendor-widget': {}, '.specific, title': {}, '[data-widget]': {} },
+    });
+    expect(fp.dom).toEqual(['#vendor-widget', '[data-widget]']);
+    const genericOnly = convertWappalyzerTech('Generic', { dom: 'footer > div' });
+    expect(genericOnly.dom).toBeUndefined();
+  });
+
+  it('sanitizes previously imported fingerprint caches without re-importing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'opentechalyzer-external-'));
+    const path = join(dir, 'external-db.json');
+    const originalPath = process.env['OPENTECHALYZER_DB_PATH'];
+    try {
+      await writeFile(path, JSON.stringify({
+        fingerprints: [
+          { name: 'Example', categories: ['misc'], dom: ['script', '.vendor-widget', 'style, iframe'] },
+        ],
+      }));
+      process.env['OPENTECHALYZER_DB_PATH'] = path;
+      const fps = await loadExternalDatabase();
+      expect(fps[0]?.dom).toEqual(['.vendor-widget']);
+    } finally {
+      if (originalPath === undefined) delete process.env['OPENTECHALYZER_DB_PATH'];
+      else process.env['OPENTECHALYZER_DB_PATH'] = originalPath;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('strips confidence tags off relationship names', () => {
