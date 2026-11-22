@@ -184,11 +184,6 @@ export class Auth0TokenVerifier {
     ) {
       throw new AuthFailure(401, 'invalid_token', 'Invalid token claims');
     }
-    const scopes = typeof payload['scope'] === 'string' ? payload['scope'].split(/\s+/) : [];
-    if (!scopes.includes(this.config.requiredScope)) {
-      throw new AuthFailure(403, 'insufficient_scope', 'Missing required scope');
-    }
-
     if (Date.now() >= this.cacheExpiresAt || !this.cachedKeys.has(header['kid'])) {
       await this.refreshKeys();
     }
@@ -207,6 +202,12 @@ export class Auth0TokenVerifier {
       signatureValid = false;
     }
     if (!signatureValid) throw new AuthFailure(401, 'invalid_token', 'Invalid token signature');
+
+    // Authorization decisions only follow successful cryptographic validation.
+    const scopes = typeof payload['scope'] === 'string' ? payload['scope'].split(/\s+/) : [];
+    if (!scopes.includes(this.config.requiredScope)) {
+      throw new AuthFailure(403, 'insufficient_scope', 'Missing required scope');
+    }
 
     // Staging-only allowlist. This claim is issued exclusively after Auth0
     // confirms email_verified=true via a Post-Login Action. Never trust a
