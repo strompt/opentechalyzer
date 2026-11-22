@@ -2,7 +2,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  Auth0TokenVerifier, AuthFailure, bearerChallenge, loadAuthConfig, protectedResourceMetadata,
+  Auth0TokenVerifier, AuthFailure, bearerChallenge, loadAuthConfig, protectedResourceMetadata, VERIFIED_EMAIL_CLAIM,
   type AuthConfig,
 } from '../src/auth.js';
 
@@ -13,6 +13,7 @@ const config: AuthConfig = {
   audience: 'https://mcp.example.com/mcp',
   resource: 'https://mcp.example.com/mcp',
   requiredScope: 'scan:website',
+  allowedEmail: 'strom.studio.pt@gmail.com',
 };
 
 function token(claims: Record<string, unknown> = {}, privateKey = keys.privateKey): string {
@@ -23,6 +24,7 @@ function token(claims: Record<string, unknown> = {}, privateKey = keys.privateKe
     aud: config.audience,
     sub: 'auth0|customer-a',
     scope: 'scan:website',
+    [VERIFIED_EMAIL_CLAIM]: 'strom.studio.pt@gmail.com',
     exp: now + 3600,
     iat: now,
     ...claims,
@@ -61,6 +63,38 @@ describe('Auth0 HTTP MCP security', () => {
       AUTH0_AUDIENCE: config.audience,
       MCP_PUBLIC_URL: 'http://mcp.example.com/mcp',
     })).toThrow('MCP_PUBLIC_URL');
+  });
+
+  it('requires a configured allowlisted email for staging', () => {
+    expect(() => loadAuthConfig({
+      AUTH0_ISSUER: config.issuer,
+      AUTH0_AUDIENCE: config.audience,
+      MCP_PUBLIC_URL: config.resource,
+    })).toThrow('MCP_ALLOWED_EMAIL');
+    expect(loadAuthConfig({
+      AUTH0_ISSUER: config.issuer,
+      AUTH0_AUDIENCE: config.audience,
+      MCP_PUBLIC_URL: config.resource,
+      MCP_ALLOWED_EMAIL: 'Strom.Studio.Pt@Gmail.com',
+    }).allowedEmail).toBe('strom.studio.pt@gmail.com');
+  });
+
+  it('rejects tokens without a verified email claim or with another account', async () => {
+    for (const value of [
+      { [VERIFIED_EMAIL_CLAIM]: undefined },
+      { [VERIFIED_EMAIL_CLAIM]: 'other@example.com' },
+      { email: config.allowedEmail, email_verified: true, [VERIFIED_EMAIL_CLAIM]: undefined },
+    ]) {
+      await expect(verifier().verifyRequest(request(token(value))))
+        .rejects.toMatchObject({ status: 403, code: 'access_denied' });
+    }
+  });
+
+  it('accepts the explicitly allowlisted email regardless of email casing', async () => {
+    const id = await verifier().verifyRequest(
+      request(token({ [VERIFIED_EMAIL_CLAIM]: 'STROM.STUDIO.PT@GMAIL.COM' })),
+    );
+    expect(id.subject).toBe('auth0|customer-a');
   });
 
   it('publishes OAuth protected resource discovery and challenges', () => {
