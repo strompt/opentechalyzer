@@ -175,13 +175,46 @@ function convertPatternRecord(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-/** Extract CSS selectors from the several shapes Wappalyzer's `dom` field takes. */
+/**
+ * Imported DOM evidence must be technology-specific.
+ *
+ * Community Wappalyzer sets include patterns like "script", "title",
+ * "footer > div", "style, script" and "iframe". Those match virtually
+ * every rendered website and were being reported as technologies at ~74%
+ * confidence. Do not let them become evidence.
+ *
+ * Requiring a class, id, custom data attribute or valued attribute is an
+ * intentionally conservative filter. It can miss some rare true detections,
+ * but a missing detection is preferable to a fabricated one in a commercial
+ * lead-intelligence product.
+ */
+export function isInformativeDomSelector(selector: string): boolean {
+  const value = selector.trim();
+  if (!value || value.length > 512) return false;
+
+  // Reject selectors with any generic alternative: ".specific, script" would
+  // match on the generic "script" branch alone.
+  const alternatives = value.split(',');
+  return alternatives.every((alternative) => {
+    const s = alternative.trim();
+    if (!s) return false;
+    const hasClassOrId = /[#.][A-Za-z_][\w-]*/.test(s);
+    const hasNamedDataAttribute = /\[\s*data-[A-Za-z_][\w-]*(?:\s*[~|^$*]?=|\s*\])/.test(s);
+    const hasValuedAttribute = /\[\s*[\w:-]+\s*[~|^$*]?=\s*['"]?[^\s\]"']{3,}/.test(s);
+    return hasClassOrId || hasNamedDataAttribute || hasValuedAttribute;
+  });
+}
+
+/** Extract only sufficiently specific DOM selectors from external fingerprints. */
 function convertDom(dom: WappalyzerTech['dom']): string[] | undefined {
   if (!dom) return undefined;
-  if (typeof dom === 'string') return [dom];
-  if (Array.isArray(dom)) return dom.filter((d): d is string => typeof d === 'string');
-  const keys = Object.keys(dom);
-  return keys.length > 0 ? keys : undefined;
+  const candidates = typeof dom === 'string'
+    ? [dom]
+    : Array.isArray(dom)
+      ? dom.filter((d): d is string => typeof d === 'string')
+      : Object.keys(dom);
+  const specific = [...new Set(candidates.filter(isInformativeDomSelector))];
+  return specific.length > 0 ? specific : undefined;
 }
 
 export function convertWappalyzerTech(name: string, tech: WappalyzerTech): Fingerprint {
@@ -321,7 +354,12 @@ export async function loadExternalDatabase(): Promise<Fingerprint[]> {
   try {
     const raw = await readFile(externalDbPath(), 'utf8');
     const parsed = JSON.parse(raw) as { fingerprints?: Fingerprint[] };
-    return parsed.fingerprints ?? [];
+    // Old imported caches still contain generic selectors. Sanitize at
+    // load-time too; otherwise users would need to re-import the database.
+    return (parsed.fingerprints ?? []).map((fingerprint) => ({
+      ...fingerprint,
+      dom: fingerprint.dom?.filter(isInformativeDomSelector),
+    }));
   } catch {
     return [];
   }
