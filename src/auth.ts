@@ -148,17 +148,21 @@ export class Auth0TokenVerifier {
 
   async verifyRequest(req: IncomingMessage): Promise<AuthIdentity> {
     const authorization = req.headers['authorization'];
-    const match = typeof authorization === 'string' && /^Bearer ([A-Za-z0-9._~-]+)$/.exec(authorization);
-    if (!match || match[1].length > MAX_TOKEN_LENGTH) {
+    const match = typeof authorization === 'string' ? /^Bearer ([A-Za-z0-9._~-]+)$/.exec(authorization) : null;
+    const token = match?.[1];
+    if (!token || token.length > MAX_TOKEN_LENGTH) {
       throw new AuthFailure(401, 'invalid_token', 'Bearer token required');
     }
-    const token = match[1];
     const parts = token.split('.');
-    if (parts.length !== 3 || !/^[A-Za-z0-9_-]+$/.test(parts[2])) {
+    const [encodedHeader, encodedPayload, encodedSignature] = parts;
+    if (
+      parts.length !== 3 || !encodedHeader || !encodedPayload || !encodedSignature ||
+      !/^[A-Za-z0-9_-]+$/.test(encodedSignature)
+    ) {
       throw new AuthFailure(401, 'invalid_token', 'Invalid access token');
     }
-    const header = objectFromPart(parts[0]);
-    const payload = objectFromPart(parts[1]);
+    const header = objectFromPart(encodedHeader);
+    const payload = objectFromPart(encodedPayload);
     if (header['alg'] !== 'RS256' || typeof header['kid'] !== 'string' || 'crit' in header) {
       throw new AuthFailure(401, 'invalid_token', 'Unsupported token header');
     }
@@ -189,9 +193,9 @@ export class Auth0TokenVerifier {
       const publicKey = createPublicKey({ key: jwk as import('node:crypto').JsonWebKey, format: 'jwk' });
       signatureValid = verifySignature(
         'RSA-SHA256',
-        Buffer.from(`${parts[0]}.${parts[1]}`),
+        Buffer.from(`${encodedHeader}.${encodedPayload}`),
         publicKey,
-        Buffer.from(parts[2], 'base64url'),
+        Buffer.from(encodedSignature, 'base64url'),
       );
     } catch {
       signatureValid = false;
